@@ -103,9 +103,6 @@ struct SessionData: Identifiable {
 
 struct AppStats {
     var sessions: [SessionData] = []  // all sessions, sorted by most recent
-    var totalSessions: Int = 0
-    // Today
-
 
     func filteredSessions(for range: TimeRange) -> [SessionData] {
         sessions.filter { range.contains($0.timestamp) }
@@ -273,8 +270,6 @@ func loadAppStats() -> AppStats {
 
     var stats = AppStats()
     stats.sessions = sessions
-    stats.totalSessions = sessions.count
-
 
 
     return stats
@@ -303,13 +298,49 @@ enum TimeRange: String, CaseIterable {
         switch self {
         case .today:    return cal.isDateInToday(date)
         case .thisWeek: return cal.isDate(date, equalTo: now, toGranularity: .weekOfYear)
-        case .last30d:  return date >= cal.date(byAdding: .day, value: -30, to: now)!
+        case .last30d:  return date >= (cal.date(byAdding: .day, value: -30, to: now) ?? now)
         case .allTime:  return true
         }
     }
 }
 
 // MARK: - Formatters
+
+/// Computes sparkline path geometry outside any @ViewBuilder context (for loops aren't
+/// allowed inside @ViewBuilder closures). Returns the data points plus the filled area
+/// path and the stroke line path.
+private func buildSparklinePaths(
+    buckets: [(label: String, cost: Double)],
+    maxVal: Double, w: CGFloat, h: CGFloat
+) -> (points: [CGPoint], area: Path, line: Path) {
+    let count = buckets.count
+    let points: [CGPoint] = (0..<count).map { i in
+        CGPoint(
+            x: w * CGFloat(i) / CGFloat(count - 1),
+            y: h * (1 - CGFloat(buckets[i].cost) / CGFloat(maxVal))
+        )
+    }
+    var area = Path()
+    area.move(to: CGPoint(x: points[0].x, y: h))
+    area.addLine(to: points[0])
+    for i in 1..<count {
+        let prev = points[i - 1], curr = points[i]
+        let cp1 = CGPoint(x: (prev.x + curr.x) / 2, y: prev.y)
+        let cp2 = CGPoint(x: (prev.x + curr.x) / 2, y: curr.y)
+        area.addCurve(to: curr, control1: cp1, control2: cp2)
+    }
+    area.addLine(to: CGPoint(x: points[count - 1].x, y: h))
+    area.closeSubpath()
+    var line = Path()
+    line.move(to: points[0])
+    for i in 1..<count {
+        let prev = points[i - 1], curr = points[i]
+        let cp1 = CGPoint(x: (prev.x + curr.x) / 2, y: prev.y)
+        let cp2 = CGPoint(x: (prev.x + curr.x) / 2, y: curr.y)
+        line.addCurve(to: curr, control1: cp1, control2: cp2)
+    }
+    return (points, area, line)
+}
 
 func fmtCost(_ v: Double) -> String { String(format: "$%.2f", v) }
 func fmtTokens(_ v: Int) -> String {
@@ -337,6 +368,21 @@ func fmtDuration(_ seconds: Int) -> String {
 let shortDateFmt: DateFormatter = {
     let f = DateFormatter()
     f.dateFormat = "MMM d HH:mm"
+    return f
+}()
+let weekdayFmt: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "EEE"
+    return f
+}()
+let dayMonthFmt: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "MMM d"
+    return f
+}()
+let monthFmt: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "MMM"
     return f
 }()
 
@@ -385,6 +431,19 @@ struct ContentView: View {
 
 // MARK: - Left Column
 
+struct RangeStats {
+    var cost: Double
+    var tokens: Int
+    var models: Int
+    var toolCalls: Int
+    var messages: Int
+    var userMessages: Int
+    var hitRatio: Double
+    var savings: Double
+    var modelBreakdown: [(model: String, fraction: Double, cost: Double)]
+    var topProjects: [(project: String, cost: Double)]
+}
+
 struct LeftColumnView: View {
     let stats: AppStats
     @Binding var selectedRange: TimeRange
@@ -398,51 +457,47 @@ struct LeftColumnView: View {
         case .today:
             let dayStart = cal.startOfDay(for: now)
             return (0..<24).map { h in
-                let start = cal.date(byAdding: .hour, value: h, to: dayStart)!
-                let end   = cal.date(byAdding: .hour, value: 1, to: start)!
+                let start = cal.date(byAdding: .hour, value: h, to: dayStart) ?? dayStart
+                let end   = cal.date(byAdding: .hour, value: 1, to: start) ?? start
                 let cost  = sessions.filter { $0.timestamp >= start && $0.timestamp < end }
                                     .reduce(0.0) { $0 + $1.totalCost }
                 return (label: String(format: "%02d:00", h), cost: cost)
             }
         case .thisWeek:
-            let weekStart = cal.date(from: cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: now))!
+            let weekStart = cal.date(from: cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: now)) ?? now
             return (0..<7).map { d in
-                let start = cal.date(byAdding: .day, value: d, to: weekStart)!
-                let end   = cal.date(byAdding: .day, value: 1, to: start)!
+                let start = cal.date(byAdding: .day, value: d, to: weekStart) ?? weekStart
+                let end   = cal.date(byAdding: .day, value: 1, to: start) ?? start
                 let cost  = sessions.filter { $0.timestamp >= start && $0.timestamp < end }
                                     .reduce(0.0) { $0 + $1.totalCost }
-                let fmt = DateFormatter(); fmt.dateFormat = "EEE"
+                let fmt = weekdayFmt
                 return (label: fmt.string(from: start), cost: cost)
             }
         case .last30d:
-            let rangeStart = cal.date(byAdding: .day, value: -29, to: cal.startOfDay(for: now))!
+            let rangeStart = cal.date(byAdding: .day, value: -29, to: cal.startOfDay(for: now)) ?? now
             return (0..<30).map { d in
-                let start = cal.date(byAdding: .day, value: d, to: rangeStart)!
-                let end   = cal.date(byAdding: .day, value: 1, to: start)!
+                let start = cal.date(byAdding: .day, value: d, to: rangeStart) ?? rangeStart
+                let end   = cal.date(byAdding: .day, value: 1, to: start) ?? start
                 let cost  = sessions.filter { $0.timestamp >= start && $0.timestamp < end }
                                     .reduce(0.0) { $0 + $1.totalCost }
-                let fmt = DateFormatter(); fmt.dateFormat = "MMM d"
+                let fmt = dayMonthFmt
                 return (label: fmt.string(from: start), cost: cost)
             }
         case .allTime:
             return (0..<12).map { m in
-                let monthDate = cal.date(byAdding: .month, value: -(11 - m), to: now)!
+                let monthDate = cal.date(byAdding: .month, value: -(11 - m), to: now) ?? now
                 let comps     = cal.dateComponents([.year, .month], from: monthDate)
-                let start     = cal.date(from: comps)!
-                let end       = cal.date(byAdding: .month, value: 1, to: start)!
-                let cost      = stats.sessions.filter { $0.timestamp >= start && $0.timestamp < end }
+                let start     = cal.date(from: comps) ?? now
+                let end       = cal.date(byAdding: .month, value: 1, to: start) ?? start
+                let cost      = sessions.filter { $0.timestamp >= start && $0.timestamp < end }
                                               .reduce(0.0) { $0 + $1.totalCost }
-                let fmt = DateFormatter(); fmt.dateFormat = "MMM"
+                let fmt = monthFmt
                 return (label: fmt.string(from: start), cost: cost)
             }
         }
     }
 
-    var rangeStats: (cost: Double, tokens: Int, models: Int, toolCalls: Int,
-                     messages: Int, userMessages: Int,
-                     hitRatio: Double, savings: Double,
-                     modelBreakdown: [(model: String, fraction: Double, cost: Double)],
-                     topProjects: [(project: String, cost: Double)]) {
+    var rangeStats: RangeStats {
         let sessions = stats.filteredSessions(for: selectedRange)
         let cost = sessions.reduce(0.0) { $0 + $1.totalCost }
         let tokens = sessions.reduce(0) { $0 + $1.totalTokens }
@@ -473,11 +528,37 @@ struct LeftColumnView: View {
         let topProjects = projectCost.sorted { $0.value > $1.value }.prefix(5)
             .map { (project: $0.key, cost: $0.value) }
 
-        return (cost, tokens, modelCost.count, toolCalls, messages, userMessages, hitRatio, savings, modelBreakdown, topProjects)
+        return RangeStats(
+            cost: cost, tokens: tokens, models: modelCost.count,
+            toolCalls: toolCalls, messages: messages, userMessages: userMessages,
+            hitRatio: hitRatio, savings: savings,
+            modelBreakdown: modelBreakdown, topProjects: topProjects
+        )
     }
 
     var body: some View {
+        let sessions = stats.filteredSessions(for: selectedRange)
         ScrollView {
+            if sessions.isEmpty {
+                VStack(spacing: 12) {
+                    Spacer()
+                    Image(systemName: "chart.bar.doc.horizontal")
+                        .font(.system(size: 36))
+                        .foregroundStyle(.tertiary)
+                    Text(stats.sessions.isEmpty ? "No sessions yet" : "No sessions for this period")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                    Text(stats.sessions.isEmpty
+                         ? "PiScope reads pi coding agent sessions from\n~/.pi/agent/sessions/"
+                         : "Try selecting a wider time range.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, minHeight: 300)
+                .padding()
+            } else {
             VStack(alignment: .leading, spacing: 12) {
 
                 // 3a. Activity card
@@ -559,6 +640,7 @@ struct LeftColumnView: View {
 
             }
             .padding()
+            } // end else
         }
     }
 }
@@ -623,56 +705,29 @@ struct SparklineView: View {
                 let w = geo.size.width
                 let h = geo.size.height
                 let count = buckets.count
-                guard count > 1 else { return AnyView(EmptyView()) }
 
-                let points: [CGPoint] = (0..<count).map { i in
-                    CGPoint(
-                        x: w * CGFloat(i) / CGFloat(count - 1),
-                        y: h * (1 - CGFloat(buckets[i].cost) / CGFloat(maxVal))
-                    )
-                }
+                if count > 1 {
+                    // Path computation uses for-loops; extracted to a helper to stay
+                    // compatible with @ViewBuilder (for loops aren't allowed inline).
+                    let paths = buildSparklinePaths(buckets: buckets, maxVal: maxVal, w: w, h: h)
 
-                // Area fill path
-                var area = Path()
-                area.move(to: CGPoint(x: points[0].x, y: h))
-                area.addLine(to: points[0])
-                for i in 1..<count {
-                    let prev = points[i - 1], curr = points[i]
-                    let cp1 = CGPoint(x: (prev.x + curr.x) / 2, y: prev.y)
-                    let cp2 = CGPoint(x: (prev.x + curr.x) / 2, y: curr.y)
-                    area.addCurve(to: curr, control1: cp1, control2: cp2)
-                }
-                area.addLine(to: CGPoint(x: points[count - 1].x, y: h))
-                area.closeSubpath()
-
-                // Line path
-                var line = Path()
-                line.move(to: points[0])
-                for i in 1..<count {
-                    let prev = points[i - 1], curr = points[i]
-                    let cp1 = CGPoint(x: (prev.x + curr.x) / 2, y: prev.y)
-                    let cp2 = CGPoint(x: (prev.x + curr.x) / 2, y: curr.y)
-                    line.addCurve(to: curr, control1: cp1, control2: cp2)
-                }
-
-                return AnyView(
                     ZStack(alignment: .bottom) {
                         // Area
-                        area.fill(
+                        paths.area.fill(
                             LinearGradient(
                                 colors: [Color.purple.opacity(0.12), Color.purple.opacity(0.01)],
                                 startPoint: .top, endPoint: .bottom
                             )
                         )
                         // Line
-                        line.stroke(Color.purple, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                        paths.line.stroke(Color.purple, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
 
                         // Hover dot
                         if let i = hoveredIndex {
                             Circle()
                                 .fill(Color.purple)
                                 .frame(width: 6, height: 6)
-                                .position(x: points[i].x, y: points[i].y)
+                                .position(x: paths.points[i].x, y: paths.points[i].y)
                         }
 
                         // Invisible hit zones
@@ -685,7 +740,7 @@ struct SparklineView: View {
                             }
                         }
                     }
-                )
+                }
             }
         }
     }
@@ -713,7 +768,7 @@ struct SectionCard<Content: View>: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(color.opacity(0.05))
-        .cornerRadius(8)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(
             RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(color.opacity(0.15), lineWidth: 1)
@@ -764,9 +819,9 @@ struct RightColumnView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 let count = stats.filteredSessions(for: selectedRange).count
-                Text(count == stats.totalSessions
+                Text(count == stats.sessions.count
                      ? "all \(count) sessions"
-                     : "\(count) of \(stats.totalSessions) sessions")
+                     : "\(count) of \(stats.sessions.count) sessions")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -782,15 +837,26 @@ struct RightColumnView: View {
             .padding(.top, 12)
 
             ScrollView {
+                if sortedSessions.isEmpty {
+                    VStack(spacing: 8) {
+                        Spacer()
+                        Text("No sessions")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 200)
+                } else {
                 LazyVStack(spacing: 6) {
-                    let maxCost = sortedSessions.map(\.totalCost).max() ?? 1
+                    let maxCost = max(sortedSessions.map(\.totalCost).max() ?? 0, 0.001)
                     ForEach(sortedSessions) { session in
-                        let fraction = maxCost > 0 ? session.totalCost / maxCost : 0
+                        let fraction = session.totalCost / maxCost
                         SessionRowView(session: session, costFraction: fraction, onDelete: onReload)
                     }
                 }
                 .padding(.horizontal)
                 .padding(.bottom, 8)
+                } // end else
             }
         }
     }
@@ -809,7 +875,7 @@ struct SortButton: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
                 .background(active ? Color.accentColor.opacity(0.15) : Color.clear)
-                .cornerRadius(4)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
         }
         .buttonStyle(.plain)
     }
@@ -904,6 +970,7 @@ struct SessionRowView: View {
                 if hovered {
                     let cacheCtx = session.rawInputTokens + session.cacheReadTokens + session.cacheWriteTokens
                     let hitPct   = cacheCtx > 0 ? Int(Double(session.cacheReadTokens) / Double(cacheCtx) * 100) : 0
+                    // cache-read ≈ 10% of input price (Anthropic) → 9× net saving
                     let saved    = session.cacheReadCost * 9
                     HStack(spacing: 6) {
                         Text("↩")
@@ -957,7 +1024,7 @@ struct SessionRowView: View {
         .padding([.trailing, .top, .bottom], 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(activityColor.opacity(bgOpacity))
-        .cornerRadius(6)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay(
             RoundedRectangle(cornerRadius: 6)
                 .strokeBorder(activityColor.opacity(costFraction * 0.25), lineWidth: 1)

@@ -22,10 +22,12 @@ swiftc -parse-as-library -framework SwiftUI -framework AppKit -o PiScope PiScope
 | `loadAppStats()` | Pure function — scans `~/.pi/agent/sessions/**/*.jsonl`, returns `AppStats` |
 | `AppStats` | Flat array of `SessionData`, plus helpers to filter by `TimeRange` |
 | `SessionData` | One pi session: cost, tokens, model, cache stats, timestamps, file path |
+| `RangeStats` | Named struct holding aggregated stats for the active time range |
 | `ContentView` | Root SwiftUI view — top bar (time range, Reload, Quit) + two columns |
 | `LeftColumnView` | Overview: Activity card, Cost card, sparkline, top projects, top models |
 | `RightColumnView` | Session list with sort controls and `SessionRowView` rows |
 | `SparklineView` | Bar chart bucketed by the active `TimeRange` (hours/days/weeks/months) |
+| `buildSparklinePaths()` | Free function that computes Bezier path geometry (called from `SparklineView`) |
 | `SectionCard` | Generic card chrome (title + rounded background) used across the left column |
 
 ## Data flow
@@ -74,3 +76,9 @@ Project path is derived from `cwd` — the last path component (e.g. `/Users/x/p
 **Sort state lives in `RightColumnView`.** Sorting is a pure display concern; it doesn't belong in the model. Sorting 50–200 sessions on every render is negligible.
 
 **Delete via `NSWorkspace.recycle`.** Sessions are moved to Trash (not permanently deleted) so the user can recover them. The file path is stored in `SessionData` for this purpose.
+
+**`buildSparklinePaths()` is a free function, not inline.** SwiftUI’s `@ViewBuilder` does not allow `for` loops that build local values (only `ForEach` views). The Bezier path construction requires imperative loops, so it lives in a plain function called from a `let` binding inside `GeometryReader`.
+
+**`DateFormatter` instances are module-level constants.** `DateFormatter` is expensive to initialise (ICU/locale setup). `sparklineBuckets` is a computed property called on every render; its formatters (`weekdayFmt`, `dayMonthFmt`, `monthFmt`, `shortDateFmt`) are hoisted to module scope to avoid per-bucket allocation.
+
+**Cache savings estimate uses `cacheReadCost × 9`.** Derived from Anthropic’s prompt-cache pricing: cache reads cost ≈10% of the normal input token price, so each dollar paid for a cache read replaces ≈10 dollars of full-price input — a net saving of ≈9× the cost paid. This is Anthropic-specific and approximate; other providers may differ.
