@@ -33,7 +33,7 @@ A lightweight macOS menu bar app to monitor your [pi coding agent](https://pi.de
 
 ## How it works
 
-PiScope scans `~/.pi/agent/sessions/` every 30 seconds on a background thread and re-parses all JSONL session files. There is no FSEvents watching and no server process — just periodic polling. All processing is local; no data leaves your machine.
+PiScope scans `~/.pi/agent/sessions/` every 30 seconds on a background thread using an incremental parser: each file's modification date is checked first, and only new or changed files are read and re-parsed. Unchanged files are served from an in-memory cache. The **Reload** button forces a full re-parse by clearing the cache. All processing is local; no data leaves your machine.
 
 ## Build & run
 
@@ -57,7 +57,6 @@ Alternatively, place the binary anywhere in your `$PATH` and add it to a `Launch
 ## Known limitations
 
 - **Cache savings are Anthropic-specific.** The formula `cacheReadCost × 9` assumes Anthropic's ~10 % cache-read pricing and will be inaccurate for other providers.
-- **No incremental parsing.** All session files are re-parsed every 30 seconds. This is intentional for simplicity and is fast enough for typical session counts.
 - **Model stats use per-session primary model.** Global model breakdowns attribute a session's full cost to its dominant model, not to each individual message's model.
 
 ## Metrics explained

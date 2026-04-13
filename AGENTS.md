@@ -25,8 +25,9 @@ swiftc -parse-as-library -framework SwiftUI -framework AppKit -o PiScope PiScope
 |--------|------|------|
 | `PiScopeApp` | struct | `@main` entry point |
 | `AppDelegate` | class | Owns `NSStatusItem`, `NSPopover`, 30 s refresh timer |
-| `StatsModel` | class | `ObservableObject` wrapping `AppStats` |
-| `loadAppStats()` | func | Pure parser — scans all JSONL files, returns `AppStats` |
+| `StatsModel` | class | `ObservableObject` wrapping `AppStats`, `isLoading` flag, and `SessionCache` |
+| `loadAppStats(cache:)` | func | Incremental parser — stats files, skips unchanged via `SessionCache`, returns `(AppStats, SessionCache)` |
+| `SessionCache` | typealias | `[URL: (modDate: Date, session: SessionData)]` — per-file parse cache keyed on modification date |
 | `AppStats` | struct | Flat `[SessionData]` + `filteredSessions(for:)` helper |
 | `SessionData` | struct | One session: cost, tokens, model, cache stats, file path |
 | `RangeStats` | struct | Aggregated stats for the selected time range (used by `LeftColumnView`) |

@@ -35,7 +35,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let popover = NSPopover()
         popover.contentSize = NSSize(width: 900, height: 700)
         popover.behavior = .transient
-        popover.contentViewController = NSHostingController(rootView: ContentView(model: statsModel, onReload: { [weak self] in self?.refresh() }))
+        popover.contentViewController = NSHostingController(rootView: ContentView(model: statsModel, onReload: { [weak self] in self?.forceRefresh() }))
         self.popover = popover
 
         // Initial load then every 30s
@@ -45,17 +45,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Incremental refresh — skips files whose modification date hasn't changed.
     func refresh() {
+        statsModel.isLoading = true
+        let currentCache = statsModel.cache
         DispatchQueue.global(qos: .background).async { [weak self] in
-            let stats = loadAppStats()
+            let (stats, newCache) = loadAppStats(cache: currentCache)
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.statsModel.cache = newCache
                 self.statsModel.stats = stats
+                self.statsModel.isLoading = false
                 let todayCost = stats.filteredSessions(for: .today).reduce(0.0) { $0 + $1.totalCost }
                 let label = String(format: "π $%.2f", todayCost)
                 self.statusItem.button?.title = label
             }
         }
+    }
+
+    /// Full refresh — clears the parse cache first, forcing every file to be
+    /// re-read. Used by the Reload button so users always get a clean slate.
+    func forceRefresh() {
+        statsModel.cache = [:]
+        refresh()
     }
 
     @objc func togglePopover() {
@@ -73,6 +85,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 class StatsModel: ObservableObject {
     @Published var stats = AppStats()
+    @Published var isLoading = false
+    /// Incremental-parse cache: maps each session file URL to its last-seen
+    /// modification date and the already-parsed SessionData. Populated and
+    /// updated by loadAppStats(cache:) on every refresh tick.
+    var cache: SessionCache = [:]
 }
 
 // MARK: - Data Models
@@ -109,17 +126,26 @@ struct AppStats {
     }
 }
 
+/// Maps a session file URL → (modification date at last parse, parsed SessionData).
+/// Used by loadAppStats(cache:) to skip files that haven't changed on disk.
+typealias SessionCache = [URL: (modDate: Date, session: SessionData)]
+
 // MARK: - JSONL Parser
 
-func loadAppStats() -> AppStats {
+/// Incrementally loads session data. Files whose modification date matches
+/// the cache entry are reused without re-reading or re-parsing. Only new or
+/// changed files are opened and parsed. Returns updated stats plus a fresh
+/// cache (entries for deleted files are automatically dropped).
+func loadAppStats(cache: SessionCache) -> (AppStats, SessionCache) {
     let sessionsDir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".pi/agent/sessions")
 
     guard let projectDirs = try? FileManager.default.contentsOfDirectory(
-        at: sessionsDir, includingPropertiesForKeys: nil
-    ) else { return AppStats() }
+        at: sessionsDir, includingPropertiesForKeys: [.contentModificationDateKey]
+    ) else { return (AppStats(), [:]) }
 
     var sessions: [SessionData] = []
+    var newCache: SessionCache = [:]
 
     let isoFull = ISO8601DateFormatter()
     isoFull.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -135,6 +161,15 @@ func loadAppStats() -> AppStats {
         ) else { continue }
 
         for file in files where file.pathExtension == "jsonl" {
+            // Fast metadata check — no file read needed for cache hits
+            let modDate = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))
+                              .flatMap { $0.contentModificationDate }
+            if let modDate, let cached = cache[file], cached.modDate == modDate {
+                newCache[file] = cached
+                sessions.append(cached.session)
+                continue
+            }
+
             guard let content = try? String(contentsOf: file, encoding: .utf8) else { continue }
             let lines = content.split(separator: "\n", omittingEmptySubsequences: true)
 
@@ -244,7 +279,7 @@ func loadAppStats() -> AppStats {
 
             let primaryModel = modelCostMap.max(by: { $0.value < $1.value })?.key ?? ""
 
-            sessions.append(SessionData(
+            let sessionData = SessionData(
                 id: sessionId,
                 cwd: sessionCwd,
                 timestamp: sessionTimestamp,
@@ -262,7 +297,11 @@ func loadAppStats() -> AppStats {
                 cacheWriteTokens: cacheWriteTokens,
                 cacheReadCost: cacheReadCost,
                 filePath: file
-            ))
+            )
+            sessions.append(sessionData)
+            if let modDate {
+                newCache[file] = (modDate: modDate, session: sessionData)
+            }
         }
     }
 
@@ -270,9 +309,7 @@ func loadAppStats() -> AppStats {
 
     var stats = AppStats()
     stats.sessions = sessions
-
-
-    return stats
+    return (stats, newCache)
 }
 
 // MARK: - Time Range
@@ -406,8 +443,19 @@ struct ContentView: View {
                 .pickerStyle(.segmented)
                 .fixedSize()
                 Spacer()
-                Button("Reload") { onReload() }
-                    .buttonStyle(.bordered)
+                Button(action: onReload) {
+                    HStack(spacing: 5) {
+                        if model.isLoading {
+                            ProgressView()
+                                .controlSize(.small)
+                                .scaleEffect(0.75)
+                                .frame(width: 12, height: 12)
+                        }
+                        Text(model.isLoading ? "Loading…" : "Reload")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(model.isLoading)
                 Button("Quit") { NSApp.terminate(nil) }
                     .buttonStyle(.bordered)
             }

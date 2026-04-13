@@ -17,9 +17,10 @@ swiftc -parse-as-library -framework SwiftUI -framework AppKit -o PiScope PiScope
 | Symbol | Role |
 |---|---|
 | `PiScopeApp` | `@main` entry point, wires `AppDelegate` via `@NSApplicationDelegateAdaptor` |
-| `AppDelegate` | Owns `NSStatusItem`, `NSPopover`, `StatsModel`, and the 30s refresh `Timer` |
-| `StatsModel` | `ObservableObject` with a single `@Published var stats: AppStats` |
-| `loadAppStats()` | Pure function — scans `~/.pi/agent/sessions/**/*.jsonl`, returns `AppStats` |
+| `AppDelegate` | Owns `NSStatusItem`, `NSPopover`, `StatsModel`, and the 30s refresh `Timer`; exposes `refresh()` (incremental) and `forceRefresh()` (cache-busting) |
+| `StatsModel` | `ObservableObject` with `@Published var stats: AppStats`, `@Published var isLoading: Bool`, and `var cache: SessionCache` |
+| `loadAppStats(cache:)` | Incremental parser — stats every file, skips unchanged ones via `SessionCache`, parses only new/modified files; returns `(AppStats, SessionCache)` |
+| `SessionCache` | `typealias [URL: (modDate: Date, session: SessionData)]` — maps each session file to its last-seen modification date and parsed result |
 | `AppStats` | Flat array of `SessionData`, plus helpers to filter by `TimeRange` |
 | `SessionData` | One pi session: cost, tokens, model, cache stats, timestamps, file path |
 | `RangeStats` | Named struct holding aggregated stats for the active time range |
@@ -36,16 +37,19 @@ swiftc -parse-as-library -framework SwiftUI -framework AppKit -o PiScope PiScope
 ~/.pi/agent/sessions/<project>/<timestamp>_<uuid>.jsonl
          │
          ▼
-  loadAppStats()          ← background DispatchQueue, every 30s
-         │ AppStats
+  loadAppStats(cache:)     ← background DispatchQueue, every 30s
+    ├─ stat each file      ← cheap metadata check (~µs per file)
+    ├─ cache hit?  ──yes──► reuse SessionData, skip file read
+    └─ cache miss? ──no───► read + parse file, update cache entry
+         │ (AppStats, SessionCache)
          ▼
-    StatsModel            ← published on main queue
+    StatsModel             ← cache + stats published on main queue
          │ @ObservedObject
          ▼
-  ContentView / subviews  ← SwiftUI re-render
+  ContentView / subviews   ← SwiftUI re-render
          │
          ▼
-  statusItem.button.title ← "π $X.XX"
+  statusItem.button.title  ← "π $X.XX"
 ```
 
 ## JSONL format
@@ -65,7 +69,7 @@ Project path is derived from `cwd` — the last path component (e.g. `/Users/x/p
 
 **Single file, no Xcode.** Keeps the app hackable and easy to understand. One file = one `swiftc` command.
 
-**No caching, no FSEvents.** Re-parse all session files every 30 s. Files are small (< 100 KB each); 100–200 sessions parse in well under a second. Simpler than incremental cache invalidation.
+**Incremental parsing via modification-date cache.** `loadAppStats(cache:)` accepts a `SessionCache` (`[URL: (modDate: Date, session: SessionData)]`) and stats every file before reading it. If the file's modification date matches the cached entry the file is skipped entirely; only new or changed files are opened and parsed. The cache is stored on `StatsModel` between ticks. The Reload button calls `forceRefresh()` which clears the cache first, guaranteeing a full re-parse as a user-controlled escape hatch (handles edge cases like same-timestamp file replacement).
 
 **`StatsModel` is not `@MainActor`.** Annotating it `@MainActor` caused actor-isolation errors with `AppDelegate` property initialization. Instead, parsing is dispatched to `DispatchQueue.global` and results are pushed back to `DispatchQueue.main` before publishing.
 
