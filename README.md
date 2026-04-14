@@ -46,13 +46,22 @@ swiftc -parse-as-library -framework SwiftUI -framework AppKit -o PiScope PiScope
 
 ## Auto-start on login
 
-To launch PiScope automatically when you log in:
+A ready-made `LaunchAgent` plist is included in this repository.
 
-1. Open **System Settings → General → Login Items & Extensions**
-2. Click **+** under "Open at Login"
-3. Select the compiled `PiScope` binary
+1. Edit `com.github.vbehar.PiScope.plist` and replace `/path/to/PiScope` with the absolute path to your compiled binary (e.g. `$(which PiScope)`).
+2. Copy it to `~/Library/LaunchAgents/`:
+   ```bash
+   cp com.github.vbehar.PiScope.plist ~/Library/LaunchAgents/
+   ```
+3. Load it immediately (no reboot needed):
+   ```bash
+   launchctl load ~/Library/LaunchAgents/com.github.vbehar.PiScope.plist
+   ```
 
-Alternatively, place the binary anywhere in your `$PATH` and add it to a `LaunchAgent` plist under `~/Library/LaunchAgents/`.
+PiScope will now start automatically on every login. To disable it:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.github.vbehar.PiScope.plist
+```
 
 ## Known limitations
 
